@@ -1,57 +1,82 @@
-pub contract BottomShot {
+import NonFungibleToken from 0xf8d6e0586b0a20c7
+
+// Here we tell Cadence that our BottomShot contract implements the interface
+pub contract BottomShot: NonFungibleToken {
   // This is a simple NFT mint counter
   pub var totalSupply: UInt64
 
-  // Declare an NFT resource type
-  pub resource NFT {
-    // The unique ID that differentiate each NFT
+  pub event ContractInitialized()
+  pub event Withdraw(id: UInt64, from: Address?)
+  pub event Deposit(id: UInt64, to: Address?)
+
+  pub let CollectionStoragePath: StoragePath
+  pub let CollectionPublicPath: PublicPath
+
+  // Out NFT resource conforms to the INFT interface
+  pub resource NFT: NonFungibleToken.INFT {
     pub let id: UInt64
 
-    // We set the ID of the NFT and update the NFT counter
-    init() {
-      self.id = BottomShot.totalSupply
-      // totalSupply is a global variable for this contract
-      BottomShot.totalSupply = BottomShot.totalSupply + (1 as UInt64)
-      
+    pub let name: String
+    pub let description: String
+    pub let thumbnail: String
+
+    init(
+        id: UInt64,
+        name: String,
+        description: String,
+        thumbnail: String,
+    ) {
+        self.id = id
+        self.name = name
+        self.description = description
+        self.thumbnail = thumbnail
     }
   }
   
-  // This interface exposes only the getIDs function
-  pub resource interface CollectionPublic {
+  pub resource interface BottomShotCollectionPublic {
+    pub fun deposit(token: @NonFungibleToken.NFT)
     pub fun getIDs(): [UInt64]
+    pub fun borrowNFT(id: UInt64): &NonFungibleToken.NFT
   }
 
-  // This is a resource that's going to contain all the NFTs any one account owns
-  pub resource Collection: CollectionPublic {
-    // This is a dictionary thta maps ID integers with NFT resources
+  pub resource Collection: BottomShotCollectionPublic, NonFungibleToken.Provider, NonFungibleToken.Receiver, NonFungibleToken.CollectionPublic {
     // the @ indicates that we're working with a resource
-    pub var ownedNFTs: @{UInt64: NFT}
-
-    // This function will deposit an NFT into the collection
-    // Takes in a variable called token of type NFT that's a resource
-    pub fun deposit(token: @NFT) {
-      // Move the NFT into the ownedNFTs dictionary
-      // <-! is the force-assignment operator
-      self.ownedNFTs[token.id] <-! token
-    }
-
-    pub fun withdraw(id: UInt64): @NFT {
-      // We pull out the NFT resource from the dictionary
-      let token <- self.ownedNFTs.remove(key: id) ??
-        panic("This collection doesn't contain an NFT with that id")
-      
-      return <- token
-    }
-
-    // Returns an array of integers
-    pub fun getIDs(): [UInt64] {
-      // the keys in the ownedNFTs dictionary are the IDs
-      return self.ownedNFTs.keys
-    }
+    pub var ownedNFTs: @{UInt64: NonFungibleToken.NFT}
 
     init() {
       // All resource values MUST be initiated so we make it empty!
       self.ownedNFTs <- {}
+    }
+
+    pub fun deposit(token: @NonFungibleToken.NFT) {
+      let token <- token as! @BottomShot.NFT
+      let id: UInt64 = token.id
+
+      // Add the new token to the dictionary, this removes the old one
+      let oldToken <- self.ownedNFTs[id] <- token
+      
+      // Trigger an event to let listeners know an NFT was deposited to this collection
+      emit Deposit(id: id, to: self.owner?.address)
+
+      // destroy (burn) the old NFT
+      destroy oldToken
+    }
+
+    pub fun withdraw(withdrawID: UInt64): @NonFungibleToken.NFT {
+      let token <- self.ownedNFTs.remove(key: withdrawID)
+        ?? panic("This collection doesn't contain an NFT with that ID")
+
+      emit Withdraw(id: token.id, from: self.owner?.address)
+
+      return <- token
+    }
+
+    pub fun getIDs(): [UInt64] {
+      return self.ownedNFTs.keys
+    }
+
+    pub fun borrowNFT(id: UInt64): &NonFungibleToken.NFT {
+      return (&self.ownedNFTs[id] as &NonFungibleToken.NFT?)!
     }
 
     // this burns the ENTIRE collection (i.e. every NFT the user owns)
@@ -60,15 +85,48 @@ pub contract BottomShot {
     }
   }
 
-  pub fun createCollection(): @Collection {
+  pub fun createEmptyCollection(): @NonFungibleToken.Collection {
     return <- create Collection()
   }
 
-  pub fun mintNFT(): @NFT {
-    return <- create NFT()
+  // Mints a new NFT with a new ID and deposits it 
+  // in the recipients collection using their collection reference
+  pub fun mintNFT(
+    recipient: &{NonFungibleToken.CollectionPublic},
+    name: String,
+    description: String,
+    thumbnail: String
+  ) {
+    // create a new NFT
+    var newNFT <- create NFT(
+      id: BottomShot.totalSupply,
+      name: name,
+      description: description,
+      thumbnail: thumbnail
+    )
+    
+    // deposit it in the recipient's account using their collection ref
+    recipient.deposit(token: <-newNFT)
+
+    BottomShot.totalSupply = BottomShot.totalSupply + UInt64(1)
   }
 
   init() {
     self.totalSupply = 0
+    
+    self.CollectionStoragePath = /storage/BottomShotCollection
+    self.CollectionPublicPath = /public/BottomShotCollection
+
+    // Create a Collection for the deployer
+    let collection <- create Collection()
+    self.account.save(<-collection, to: self.CollectionStoragePath)
+
+    // Create a public capability for the Collection
+    self.account.link<&BottomShot.Collection{NonFungibleToken.CollectionPublic, BottomShot.BottomShotCollectionPublic}>(
+      self.CollectionPublicPath,
+      target: self.CollectionStoragePath
+    )
+
+    emit ContractInitialized()
   }
 }
